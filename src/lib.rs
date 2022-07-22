@@ -8,7 +8,7 @@ declare_id!("2ocbQycEn49nySkwoVN4fwiJTPR8zynjA77DbFj7qy1H");
 pub mod nftotc {
     use super::*;
 
-    pub fn create_otc(ctx: Context<CreateOTC>, otc_nonce, amount_a: Vec<u128>, amount_b: Vec<u128>, expires: u128) -> Result<()> {
+    pub fn create_otc(ctx: Context<CreateOTC>, otc_nonce: u8, amount_a: Vec<u128>, amount_b: Vec<u128>, expires: u128) -> Result<()> {
         let otc = &mut ctx.accounts.otc;
         otc.seller = ctx.accounts.seller.key();
         otc.nonce = otc_nonce;
@@ -65,6 +65,7 @@ pub mod nftotc {
         let c = clock::Clock::get().unwrap();
 
         require!(c.unix_timestamp < otc.expires || otc.expires == 0, ErrorCode::Expired);
+        require!(otc.executed == false, ErrorCode::AlreadyExecuted);
         for x in 1..5 {
             if otc.buy_asset[x].asset_mint != ctx.accounts.seller.key {
                 if otc.buy_asset[x].asset_vault == ctx.accounts.token_b_seller_vault[x].key {
@@ -77,7 +78,7 @@ pub mod nftotc {
                                 authority: ctx.accounts.buyer.to_account_info(), 
                             },
                         );
-                        token::transfer(cpi_ctx, buy_asset[x].amount)?;
+                        token::transfer(cpi_ctx, ctx.accounts.otc.buy_asset[x].amount)?;
                     }
                 }
             }
@@ -109,59 +110,44 @@ pub mod nftotc {
         Ok(())
     }
 
-    // pub fn cancel_otc(ctx: Context<CancelOTC>) -> Result<()> {
-    //     let otc = &mut ctx.accounts.otc;
-    //     let c = clock::Clock::get().unwrap();
+    pub fn cancel_otc(ctx: Context<CancelOTC>) -> Result<()> {
+        let otc = &mut ctx.accounts.otc;
+        let c = clock::Clock::get().unwrap();
 
-    //     require!(c.unix_timestamp < otc.expires || otc.expires == 0, ErrorCode::Expired);
-    //     for x in 1..5 {
-    //         if otc.buy_asset[x].asset_mint != ctx.accounts.seller.key {
-    //             if otc.buy_asset[x].asset_vault == ctx.accounts.token_b_seller_vault[x].key {
-    //                 {
-    //                     let cpi_ctx = CpiContext::new(
-    //                         ctx.accounts.token_program.to_account_info(),
-    //                         token::Transfer {
-    //                             from: ctx.accounts.token_b_vault[x].to_account_info(),
-    //                             to: ctx.accounts.token_b_seller_vault[x].to_account_info(),
-    //                             authority: ctx.accounts.buyer.to_account_info(), 
-    //                         },
-    //                     );
-    //                     token::transfer(cpi_ctx, buy_asset[x].amount)?;
-    //                 }
-    //             }
-    //         }
-
-    //         if otc.sell_asset[x].asset_mint != ctx.accounts.seller.key {
-    //             if otc.sell_asset[x].asset_vault == ctx.accounts.token_a_otc_vault[x].key {
-    //                 {
-    //                     let seeds = &[
-    //                         ctx.accounts.otc.to_account_info().key.as_ref(),
-    //                         &[ctx.accounts.otc.nonce],
-    //                     ];
-    //                     let otc_signer = &[&seeds[..]];
+        require!(c.unix_timestamp < otc.expires || otc.expires == 0, ErrorCode::Expired);
+        require!(otc.executed == false, ErrorCode::AlreadyExecuted);
+        for x in 1..5 {
+            if otc.sell_asset[x].asset_mint != ctx.accounts.seller.key {
+                if otc.sell_asset[x].asset_vault == ctx.accounts.token_a_otc_vault[x].key {
+                    {
+                        let seeds = &[
+                            ctx.accounts.otc.to_account_info().key.as_ref(),
+                            &[ctx.accounts.otc.nonce],
+                        ];
+                        let otc_signer = &[&seeds[..]];
             
-    //                     let cpi_ctx = CpiContext::new_with_signer(
-    //                         ctx.accounts.token_program.to_account_info(),
-    //                         token::Transfer {
-    //                             from: ctx.accounts.token_a_otc_vault[x].to_account_info(),
-    //                             to: ctx.accounts.token_a_buyer_vault[x].to_account_info(),
-    //                             authority: ctx.accounts.otc_signer.to_account_info(),
-    //                         },
-    //                         otc_signer,
-    //                     );
-    //                     token::transfer(cpi_ctx, ctx.accounts.otc.sell_asset[x].amount as u64)?;
-    //                 }
-    //             }
-    //         }
-    //     }
+                        let cpi_ctx = CpiContext::new_with_signer(
+                            ctx.accounts.token_program.to_account_info(),
+                            token::Transfer {
+                                from: ctx.accounts.token_a_otc_vault[x].to_account_info(),
+                                to: ctx.accounts.token_a_vault[x].to_account_info(),
+                                authority: ctx.accounts.otc_signer.to_account_info(),
+                            },
+                            otc_signer,
+                        );
+                        token::transfer(cpi_ctx, ctx.accounts.otc.sell_asset[x].amount as u64)?;
+                    }
+                }
+            }
+        }
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
 #[instruction(otc_nonce: u8)]
-pub struct CreateOTC {
+pub struct CreateOTC<'info> {
     pub buyer: Signer<'info>,
 
     pub seller: UncheckedAccount<'info>,
@@ -188,7 +174,7 @@ pub struct CreateOTC {
 }
 
 #[derive(Accounts)]
-pub struct ExecuteOTC {
+pub struct ExecuteOTC<'info> {
     #[account(
         constraint = otc.buyer == buyer.key
     )]
@@ -223,7 +209,7 @@ pub struct ExecuteOTC {
 }
 
 #[derive(Accounts)]
-pub struct CancelOTC {
+pub struct CancelOTC<'info> {
     #[account(
         constraint = otc.buyer == buyer.key
     )]
@@ -278,7 +264,9 @@ pub struct Asset {
 }
 
 #[error_code]
-pub struct ErrorCode {
+pub enum ErrorCode {
     #[msg("Expired")]
     Expired,
+    #[msg("Already executed")]
+    AlreadyExecuted,
 }
