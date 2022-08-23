@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 
 #[account]
-pub struct OTC {
+pub struct Otc {
     /// Seller
     pub seller: Pubkey,
     /// Buyer (if any)
