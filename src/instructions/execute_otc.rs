@@ -3,11 +3,9 @@ use crate::state::*;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::clock;
 use anchor_spl::token::{self, Token, TokenAccount};
+
 #[derive(Accounts)]
 pub struct ExecuteOTC<'info> {
-    #[account(
-        constraint = otc.buyer == *buyer.key
-    )]
     pub buyer: Signer<'info>,
 
     /// CHECK: TODO
@@ -16,20 +14,17 @@ pub struct ExecuteOTC<'info> {
     )]
     pub seller: UncheckedAccount<'info>,
 
-    // pub token_a_mint: Vec<Box<Account<'info, Mint>>>,
-    // pub token_a_buyer_vault: Vec<Box<Account<'info, TokenAccount>>>,
-    // pub token_a_otc_vault: Vec<Box<Account<'info, TokenAccount>>>,
-
-    // pub token_b_mint: Vec<Box<Account<'info, Mint>>>,
-    // pub token_b_vault: Vec<Box<Account<'info, TokenAccount>>>,
-    // pub token_b_seller_vault: Vec<Box<Account<'info, TokenAccount>>>,
-    #[account(mut)]
-    pub otc: Box<Account<'info, OTC>>,
+    #[account(
+        mut,
+        constraint = otc.seller == *seller.key,
+    )]
+    pub otc: Box<Account<'info, Otc>>,
 
     /// CHECK: TODO
     #[account(
         seeds = [
             otc.to_account_info().key.as_ref(),
+            seller.to_account_info().key.as_ref(),
         ],
         bump = otc.nonce
     )]
@@ -41,80 +36,96 @@ pub struct ExecuteOTC<'info> {
 
 pub fn handler<'info>(ctx: Context<'_, '_, '_, 'info, ExecuteOTC<'info>>) -> Result<()> {
     let otc = &mut ctx.accounts.otc;
-    let c = clock::Clock::get().unwrap();
 
-    // require!(
-    //     (c.unix_timestamp as u128) < (otc.expires as u128) || otc.expires == 0,
-    //     ErrorCode::Expired
-    // );
     require!(otc.executed == false, ErrorCode::AlreadyExecuted);
     msg!("{}", otc.sell_asset.len());
     let sell_asset_count = otc.sell_asset.len();
     let mut remaining_accounts_counter: usize = 0;
 
+    if token::ID != *ctx.accounts.token_program.key {
+        return Err(error!(ErrorCode::InvalidTokenId));
+    }
+
+    if otc.buyer == ctx.accounts.seller.key() {
+        msg!("NICE!");
+    } else if otc.buyer != ctx.accounts.seller.key() {
+        return Err(error!(ErrorCode::InvalidBuyer));
+    } else if ctx.accounts.buyer.key() != otc.buyer {
+        return Err(error!(ErrorCode::InvalidBuyer));
+    }
+
     for n in 0..sell_asset_count {
         let token_a_mint = &ctx.remaining_accounts[remaining_accounts_counter];
         remaining_accounts_counter += 1;
 
-        if token_a_mint.key() != otc.sell_asset[n].asset_mint
-            && token_a_mint.key() == ctx.accounts.seller.key()
-        {
-            return Err(error!(ErrorCode::MintAccountWrong));
+        if token_a_mint.key() != ctx.accounts.seller.key() && token_a_mint.key() == otc.sell_asset[n].asset_mint {
+            let token_a_buyer_account_info = &ctx.remaining_accounts[remaining_accounts_counter];
+            remaining_accounts_counter += 1;
+            let token_a_seller_vault_info = &ctx.remaining_accounts[remaining_accounts_counter];
+            remaining_accounts_counter += 1;
+            if otc.sell_asset[n].asset_vault != token_a_seller_vault_info.key() {
+                return Err(error!(ErrorCode::MintAccountWrong));
+            }
+
+            let token_a_buyer_account = Account::<TokenAccount>::try_from(token_a_buyer_account_info)?;        
+            let token_a_seller_account = Account::<TokenAccount>::try_from(token_a_seller_vault_info)?;
+
+            if token_a_buyer_account.owner != ctx.accounts.buyer.key() && token_a_seller_account.owner != ctx.accounts.seller.key() {
+                return Err(error!(ErrorCode::InvalidOwner));
+            }
+
+            let seeds = &[otc.to_account_info().key.as_ref(), ctx.accounts.seller.key.as_ref(), &[otc.nonce]];
+            let otc_signer = &[&seeds[..]];
+
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: token_a_seller_vault_info.to_account_info(),
+                    to: token_a_buyer_account_info.to_account_info(),
+                    authority: ctx.accounts.otc_signer.to_account_info(),
+                },
+                otc_signer,
+            );
+            token::transfer(cpi_ctx, otc.sell_asset[n].amount as u64)?;
+        } else {
+            remaining_accounts_counter += 2;
         }
-
-        let token_a_buyer_account_info = &ctx.remaining_accounts[remaining_accounts_counter];
-        remaining_accounts_counter += 1;
-        let token_a_otc_vault_info = &ctx.remaining_accounts[remaining_accounts_counter];
-        remaining_accounts_counter += 1;
-        if otc.sell_asset[n].asset_vault != token_a_otc_vault_info.key() {
-            return Err(error!(ErrorCode::MintAccountWrong));
-        }
-
-        let seeds = &[otc.to_account_info().key.as_ref(), &[otc.nonce]];
-        let otc_signer = &[&seeds[..]];
-
-        let cpi_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            token::Transfer {
-                from: token_a_otc_vault_info.to_account_info(),
-                to: token_a_buyer_account_info.to_account_info(),
-                authority: ctx.accounts.otc_signer.to_account_info(),
-            },
-            otc_signer,
-        );
-        token::transfer(cpi_ctx, otc.sell_asset[n].amount as u64)?;
-
+    
+        
         let token_b_mint_info = &ctx.remaining_accounts[remaining_accounts_counter];
         remaining_accounts_counter += 1;
-        if token_b_mint_info.key() != otc.buy_asset[n].asset_mint
-            && token_b_mint_info.key() == ctx.accounts.seller.key()
-        {
-            return Err(error!(ErrorCode::MintAccountWrong));
+
+        if token_b_mint_info.key() != ctx.accounts.seller.key() && token_b_mint_info.key() == otc.buy_asset[n].asset_mint {
+            let token_b_token_account_info = &ctx.remaining_accounts[remaining_accounts_counter];
+            remaining_accounts_counter += 1;
+            // let token_b_token_account = Account::<TokenAccount>::try_from(token_b_token_account_info)?;
+            let token_b_seller_token_account_info = &ctx.remaining_accounts[remaining_accounts_counter];
+            remaining_accounts_counter += 1;
+            let token_b_seller_token_account = 
+                Account::<TokenAccount>::try_from(token_b_seller_token_account_info)?;
+            let token_b_token_account = 
+                Account::<TokenAccount>::try_from(token_b_token_account_info)?;
+
+            if otc.buy_asset[n].asset_vault != token_b_seller_token_account_info.key()
+                && token_b_seller_token_account.owner != ctx.accounts.seller.key()
+                && token_b_token_account.owner != ctx.accounts.buyer.key()
+            {
+                return Err(error!(ErrorCode::MintAccountWrong));
+            }
+
+            let cpi_ctx = CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                token::Transfer {
+                    from: token_b_token_account_info.to_account_info(),
+                    to: token_b_seller_token_account.to_account_info(),
+                    authority: ctx.accounts.buyer.to_account_info(),
+                },
+            );
+            token::transfer(cpi_ctx, otc.buy_asset[n].amount as u64)?;
+        } else {
+            remaining_accounts_counter += 2;
         }
-
-        let token_b_token_account_info = &ctx.remaining_accounts[remaining_accounts_counter];
-        remaining_accounts_counter += 1;
-        // let token_b_token_account = Account::<TokenAccount>::try_from(token_b_token_account_info)?;
-        let token_b_seller_token_account_info = &ctx.remaining_accounts[remaining_accounts_counter];
-        remaining_accounts_counter += 1;
-        let token_b_seller_token_account =
-            Account::<TokenAccount>::try_from(token_b_seller_token_account_info)?;
-
-        if otc.buy_asset[n].asset_vault != token_b_seller_token_account_info.key()
-            && token_b_seller_token_account.owner != ctx.accounts.seller.key()
-        {
-            return Err(error!(ErrorCode::MintAccountWrong));
-        }
-
-        let cpi_ctx = CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            token::Transfer {
-                from: token_b_token_account_info.to_account_info(),
-                to: token_b_seller_token_account.to_account_info(),
-                authority: ctx.accounts.buyer.to_account_info(),
-            },
-        );
-        token::transfer(cpi_ctx, otc.buy_asset[n].amount as u64)?;
+        
     }
 
     otc.executed = true;
