@@ -18,4 +18,10 @@ pub enum ErrorCode {
     MisMatchBuyerOwner,
     #[msg("Length MisMatch")]
     LengthMisMatch,
+    #[msg("Invalid Owner")]
+    InvalidOwner,
+    #[msg("Incorrect Token ID")]
+    InvalidTokenId,
+    #[msg("Invalid Buyer")]
+    InvalidBuyer,
 }
