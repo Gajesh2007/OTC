@@ -7,7 +7,7 @@ pub use errors::ErrorCode;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("CknCfa6fDRwMTomtVx4yaEWbWrY6pLviW2c28gkapWbT");
+declare_id!("2qtPWREXxQbTZidekTeU7e5nphygjoJuZRMJwwYL8pq5");
 
 #[program]
 pub mod nftotc {
